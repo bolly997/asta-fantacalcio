@@ -110,6 +110,3 @@ State (simplified):
 
 ## Security
 - Intended for trusted local networks. No authentication/authorization is provided. Do not expose publicly without adding access controls.
-
-## License
-- Add a license for your repository (e.g., MIT) as `LICENSE`.
