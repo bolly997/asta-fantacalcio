@@ -219,13 +219,14 @@ if ($action === 'players') {
             fgetcsv($handle); // Skip column headers
             
             while (($data = fgetcsv($handle)) !== false) {
-                if (count($data) >= 5) {
+                if (count($data) >= 6) {
                     $players[] = [
                         'id' => $data[0],
                         'role' => $data[1],
                         'role_detail' => $data[2],
                         'name' => $data[3],
-                        'team' => $data[4]
+                        'team' => $data[4],
+                        'qt_a' => $data[5]
                     ];
                 }
             }
@@ -253,6 +254,39 @@ if ($action === 'logo' && $method === 'GET') {
     header('Content-Type: image/png');
     header('Cache-Control: public, max-age=86400'); // Cache for 24 hours
     readfile($logo_file);
+    exit;
+}
+
+if ($action === 'remove_player' && $method === 'POST') {
+    $player = $_POST['player'] ?? '';
+    $roundId = (int)($_POST['round_id'] ?? 0);
+    
+    if (empty($player) || $roundId <= 0) {
+        respond_json(['ok' => false, 'error' => 'Player name and round ID required']);
+        exit;
+    }
+    
+    $result = with_state_lock(function($state) use ($player, $roundId) {
+        // Find the auction in history
+        $foundIndex = -1;
+        foreach ($state['history'] as $index => $auction) {
+            if ($auction['player'] === $player && $auction['round_id'] == $roundId) {
+                $foundIndex = $index;
+                break;
+            }
+        }
+        
+        if ($foundIndex === -1) {
+            return ['ok' => false, 'error' => 'Auction not found'];
+        }
+        
+        // Remove the auction from history
+        array_splice($state['history'], $foundIndex, 1);
+        
+        return ['ok' => true];
+    });
+    
+    respond_json($result);
     exit;
 }
 
@@ -391,146 +425,440 @@ if ($view === 'screen') {
         </div>
         <div class="footer" style="margin-top:4px">Utenti connessi</div>
         <div id="presence" class="presence-grid"></div>
-                 <h1>Asta: <img id="current-team-logo" class="team-logo-screen" style="display:none;width:40px;height:40px;object-fit:contain;margin-right:10px;vertical-align:middle"> <span id="player" class="player">—</span></h1>
-         <div style="display:flex;align-items:center;justify-content:space-between;margin:20px 0">
-           <div class="price" id="amount">$ 0</div>
-           <div class="timer-big" id="timer">—</div>
-         </div>
-         <div class="leader" id="leader">Leader: —</div>
-         <div class="footer">Aggiornamento in tempo reale (poll 400ms)</div>
-        <div class="list" style="margin-top:18px">
-          <table>
-            <thead><tr><th>#</th><th>Ora</th><th>Nome</th><th>+Δ</th><th>Totale</th></tr></thead>
-            <tbody id="bids"></tbody>
-          </table>
-        </div>
-        <div style="margin-top:16px">
-          <div class="footer">Storico aste</div>
-          <div class="list">
-            <table>
-              <thead><tr><th></th><th>#</th><th>Giocatore</th><th>Vincitore</th><th>Totale</th><th>Offerte</th><th>Ultimo</th></tr></thead>
-              <tbody id="history"></tbody>
-            </table>
+                  <h1>Asta: <img id="current-team-logo" class="team-logo-screen" style="display:none;width:40px;height:40px;object-fit:contain;margin-right:10px;vertical-align:middle"> <span id="player" class="player">—</span></h1>
+          <div style="display:flex;align-items:center;justify-content:space-between;margin:20px 0">
+            <div class="price" id="amount">$ 0</div>
+            <div class="timer-big" id="timer">—</div>
           </div>
+          <div class="leader" id="leader">Leader: —</div>
+          <div class="footer">Aggiornamento in tempo reale (poll 400ms)</div>
+         <div class="list" style="margin-top:18px">
+           <table>
+             <thead><tr><th>#</th><th>Ora</th><th>Nome</th><th>+Δ</th><th>Totale</th></tr></thead>
+             <tbody id="bids"></tbody>
+           </table>
+         </div>
+         <div style="margin-top:16px">
+           <div class="footer">Storico aste</div>
+           <div class="list">
+             <table>
+               <thead><tr><th></th><th>#</th><th>Giocatore</th><th>Vincitore</th><th>Totale</th><th>Offerte</th><th>Ultimo</th></tr></thead>
+               <tbody id="history"></tbody>
+             </table>
+           </div>
+         </div>
+       </div>
+     </div>
+     <script>
+     const fmt = n => new Intl.NumberFormat('it-IT').format(n);
+     let lastState = null;
+     let allPlayers = [];
+
+     // Load players data for team logo fallback
+     async function loadPlayers() {
+         try {
+             const response = await fetch('?action=players');
+             const data = await response.json();
+             if (data.ok) {
+                 allPlayers = data.players;
+             }
+         } catch (e) {
+             console.error('Error loading players:', e);
+         }
+     }
+
+     function render(state){
+         lastState = state;
+         const c = state.current || {};
+         document.getElementById('player').textContent = c.active ? c.player : '—';
+         
+         // Handle current team logo
+         const currentLogo = document.getElementById('current-team-logo');
+         if (c.active && c.team) {
+             currentLogo.src = `?action=logo&team=${encodeURIComponent(c.team)}`;
+             currentLogo.style.display = 'inline-block';
+             currentLogo.onerror = () => currentLogo.style.display = 'none';
+         } else {
+             currentLogo.style.display = 'none';
+         }
+         
+         document.getElementById('amount').textContent = '$ ' + fmt(c.amount||0);
+         document.getElementById('leader').textContent = c.active && c.leader_name ? ('Leader: ' + c.leader_name) : '—';
+         // Presence render
+         const pres = document.getElementById('presence');
+         if (pres){
+           const entries = Object.entries(state.presence||{});
+           if (!entries.length){ pres.innerHTML = ''; }
+           else{
+             pres.innerHTML = entries.map(([pid,p])=>{
+               const name = (p && p.user_name) ? p.user_name : '—';
+               const initials = name.split(/\s+/).map(s=>s[0]).join('').toUpperCase().slice(0,2) || 'U';
+               const last = p && p.last_seen ? new Date(p.last_seen*1000).toLocaleTimeString('it-IT') : '—';
+               return `<div class="presence-card" title="${name}">
+                         <div class="avatar">${initials}</div>
+                         <div class="meta">
+                           <div class="name">${name}</div>
+                           <div class="sub"><span class="dot"></span>Ping: ${last}</div>
+                         </div>
+                       </div>`;
+             }).join('');
+           }
+         }
+         const tbody = document.getElementById('bids');
+         tbody.innerHTML = '';
+         (state.bids||[]).forEach(b => {
+             const tr = document.createElement('tr');
+             tr.innerHTML = `<td class="badge mono">${b.seq}</td><td>${new Date(b.ts).toLocaleTimeString('it-IT')}</td><td>${b.user_name||''}</td><td>+${b.delta||0}</td><td>$ ${fmt(b.amount||0)}</td>`;
+             tbody.appendChild(tr);
+         });
+
+         // Render history table rows
+         const h = document.getElementById('history');
+         if (h) {
+             h.innerHTML = '';
+             (state.history||[]).slice().reverse().forEach(r => {
+                 const lastTs = (r.bids && r.bids.length) ? r.bids[r.bids.length-1].ts : null;
+                 const lastStr = lastTs ? new Date(lastTs).toLocaleTimeString('it-IT') : '—';
+                 const tr = document.createElement('tr');
+                 
+                 // Create team logo cell - try to find team from player name if not stored
+                 let teamName = r.team;
+                 if (!teamName && r.player && allPlayers) {
+                     const playerData = allPlayers.find(p => p.name === r.player);
+                     teamName = playerData ? playerData.team : '';
+                 }
+                 
+                 const logoCell = teamName ? 
+                     `<td style="text-align:center;width:40px"><img src="?action=logo&team=${encodeURIComponent(teamName)}" alt="${teamName}" style="width:24px;height:24px;object-fit:contain;vertical-align:middle" onerror="this.style.display='none'"></td>` : 
+                     '<td style="text-align:center;width:40px"></td>';
+                 
+                 tr.innerHTML = `${logoCell}<td class="badge mono">${r.round_id}</td><td>${r.player}</td><td>${r.winner_name||'—'}</td><td>$ ${fmt(r.final_amount||0)}</td><td>${r.bids?.length||0}</td><td>${lastStr}</td>`;
+                 h.appendChild(tr);
+             });
+         }
+     }
+
+     async function poll(){
+         try{
+           const r = await fetch('?action=state');
+           if(!r.ok) return;
+           const j = await r.json();
+           render(j.state);
+         }catch(e){}
+         setTimeout(poll, 400); // server poll every 400ms
+     }
+
+     // Smooth countdown every 100ms without extra server calls
+     setInterval(() => {
+       if (!lastState) return;
+       const c = lastState.current || {};
+       const t = document.getElementById('timer');
+       if (c.active && c.last_bid_time){
+         const remaining = Math.max(0, 5 - (Date.now()/1000 - c.last_bid_time));
+         t.textContent = (Math.ceil(remaining*10)/10).toFixed(1) + 's';
+       } else {
+         t.textContent = '—';
+       }
+     }, 100);
+
+     // Load players data first, then start polling
+     loadPlayers().then(() => {
+         poll();
+     });
+     </script>
+     <?php
+     render_footer();
+     exit;
+ }
+
+if ($view === 'listone') {
+    // Release session for read-only listone
+    session_close_early();
+    render_header('Listone Giocatori');
+    ?>
+    <div class="container">
+      <div class="row" style="align-items:center;justify-content:space-between;margin-bottom:16px">
+        <div><span class="badge">Listone</span></div>
+        <div><a class="badge" href="./">Torna al pannello</a></div>
+      </div>
+      
+      <div id="listone-content">
+        <div class="card">
+          <h2 class="title">Caricamento giocatori...</h2>
         </div>
       </div>
     </div>
+    
     <script>
     const fmt = n => new Intl.NumberFormat('it-IT').format(n);
-    let lastState = null;
     let allPlayers = [];
+    let auctionHistory = [];
 
-    // Load players data for team logo fallback
-    async function loadPlayers() {
+    // Load players and auction history
+    async function loadData() {
         try {
-            const response = await fetch('?action=players');
+            // Load players
+            const playersResponse = await fetch('?action=players');
+            const playersData = await playersResponse.json();
+            if (playersData.ok) {
+                allPlayers = playersData.players;
+            }
+            
+            // Load auction history
+            const stateResponse = await fetch('?action=state');
+            const stateData = await stateResponse.json();
+            if (stateData.ok) {
+                auctionHistory = stateData.state.history || [];
+            }
+            
+            renderListone();
+        } catch (e) {
+            console.error('Error loading data:', e);
+        }
+    }
+
+    function renderListone() {
+        // Get sold players (those that have been auctioned)
+        const soldPlayers = new Set();
+        auctionHistory.forEach(auction => {
+            if (auction.player) {
+                soldPlayers.add(auction.player);
+            }
+        });
+        
+        // Filter remaining players
+        const remainingPlayers = allPlayers.filter(player => !soldPlayers.has(player.name));
+        
+        // Group by role and sort by Qt.A
+        const roleGroups = {
+            'P': { name: 'Portieri', players: [] },
+            'D': { name: 'Difensori', players: [] },
+            'C': { name: 'Centrocampisti', players: [] },
+            'A': { name: 'Attaccanti', players: [] }
+        };
+        
+        remainingPlayers.forEach(player => {
+            if (roleGroups[player.role]) {
+                roleGroups[player.role].players.push(player);
+            }
+        });
+        
+        // Sort each group by Qt.A (descending)
+        Object.values(roleGroups).forEach(group => {
+            group.players.sort((a, b) => {
+                const qtA = parseInt(a.qt_a || '0');
+                const qtB = parseInt(b.qt_a || '0');
+                return qtB - qtA; // Descending order
+            });
+        });
+        
+        // Render the listone
+        const content = document.getElementById('listone-content');
+        content.innerHTML = '';
+        
+        Object.entries(roleGroups).forEach(([role, group]) => {
+            if (group.players.length === 0) return;
+            
+            const roleCard = document.createElement('div');
+            roleCard.className = 'card';
+            roleCard.style.marginBottom = '16px';
+            
+            roleCard.innerHTML = `
+                <h2 class="title">${group.name} (${group.players.length})</h2>
+                <div class="list">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th style="width:40px"></th>
+                                <th>Nome</th>
+                                <th>Squadra</th>
+                                <th>Ruolo</th>
+                                <th>Qt.A</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${group.players.map(player => `
+                                <tr>
+                                    <td style="text-align:center">
+                                        <img src="?action=logo&team=${encodeURIComponent(player.team)}" 
+                                             alt="${player.team}" 
+                                             style="width:24px;height:24px;object-fit:contain;vertical-align:middle" 
+                                             onerror="this.style.display='none'">
+                                    </td>
+                                    <td><strong>${player.name}</strong></td>
+                                    <td>${player.team}</td>
+                                    <td><span class="badge">${player.role}</span></td>
+                                    <td><span class="badge mono">${player.qt_a || '0'}</span></td>
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                    </table>
+                </div>
+            `;
+            
+            content.appendChild(roleCard);
+        });
+        
+        // Add summary card
+        const totalRemaining = remainingPlayers.length;
+        const summaryCard = document.createElement('div');
+        summaryCard.className = 'card';
+        summaryCard.innerHTML = `
+            <h2 class="title">Riepilogo</h2>
+            <div class="row" style="gap:16px">
+                <div class="badge">Giocatori rimanenti: <strong>${totalRemaining}</strong></div>
+                <div class="badge">Giocatori venduti: <strong>${soldPlayers.size}</strong></div>
+                <div class="badge">Totale giocatori: <strong>${allPlayers.length}</strong></div>
+            </div>
+        `;
+        content.appendChild(summaryCard);
+    }
+
+    // Load data when page loads
+    loadData();
+    </script>
+    <?php
+    render_footer();
+    exit;
+}
+
+if ($view === 'remove') {
+    // Release session for read-only remove
+    session_close_early();
+    render_header('Rimuovi Giocatore');
+    ?>
+    <div class="container">
+      <div class="row" style="align-items:center;justify-content:space-between;margin-bottom:16px">
+        <div><span class="badge">Rimuovi Giocatore</span></div>
+        <div><a class="badge" href="./">Torna al pannello</a></div>
+      </div>
+      
+      <div id="remove-content">
+        <div class="card">
+          <h2 class="title">Caricamento aste completate...</h2>
+        </div>
+      </div>
+    </div>
+    
+    <script>
+    const fmt = n => new Intl.NumberFormat('it-IT').format(n);
+    let auctionHistory = [];
+
+    // Load auction history
+    async function loadData() {
+        try {
+            const stateResponse = await fetch('?action=state');
+            const stateData = await stateResponse.json();
+            if (stateData.ok) {
+                auctionHistory = stateData.state.history || [];
+            }
+            
+            renderRemovePage();
+        } catch (e) {
+            console.error('Error loading data:', e);
+        }
+    }
+
+    function renderRemovePage() {
+        const content = document.getElementById('remove-content');
+        
+        if (auctionHistory.length === 0) {
+            content.innerHTML = `
+                <div class="card">
+                    <h2 class="title">Nessuna asta completata</h2>
+                    <p>Non ci sono ancora aste completate da cui rimuovere giocatori.</p>
+                </div>
+            `;
+            return;
+        }
+        
+        content.innerHTML = `
+            <div class="card">
+                <h2 class="title">Aste Completate (${auctionHistory.length})</h2>
+                <p>Seleziona un giocatore da rimuovere dalla lista delle aste completate. Il giocatore tornerà disponibile nel listone.</p>
+                
+                <div class="list" style="margin-top:16px">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th style="width:40px"></th>
+                                <th>#</th>
+                                <th>Giocatore</th>
+                                <th>Vincitore</th>
+                                <th>Prezzo Finale</th>
+                                <th>Offerte</th>
+                                <th>Ultimo Bid</th>
+                                <th style="width:100px">Azione</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${auctionHistory.slice().reverse().map((auction, index) => {
+                                const lastTs = (auction.bids && auction.bids.length) ? auction.bids[auction.bids.length-1].ts : null;
+                                const lastStr = lastTs ? new Date(lastTs).toLocaleTimeString('it-IT') : '—';
+                                
+                                return `
+                                    <tr>
+                                        <td style="text-align:center">
+                                            ${auction.team ? 
+                                                `<img src="?action=logo&team=${encodeURIComponent(auction.team)}" 
+                                                      alt="${auction.team}" 
+                                                      style="width:24px;height:24px;object-fit:contain;vertical-align:middle" 
+                                                      onerror="this.style.display='none'">` : 
+                                                ''
+                                            }
+                                        </td>
+                                        <td class="badge mono">${auction.round_id}</td>
+                                        <td><strong>${auction.player}</strong></td>
+                                        <td>${auction.winner_name || '—'}</td>
+                                        <td><span class="badge mono">$ ${fmt(auction.final_amount || 0)}</span></td>
+                                        <td><span class="badge">${auction.bids?.length || 0}</span></td>
+                                        <td>${lastStr}</td>
+                                        <td style="text-align:center">
+                                            <button class="btn btn-danger" onclick="removePlayer('${auction.player}', ${auction.round_id})">
+                                                Rimuovi
+                                            </button>
+                                        </td>
+                                    </tr>
+                                `;
+                            }).join('')}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        `;
+    }
+
+    async function removePlayer(playerName, roundId) {
+        if (!confirm(`Sei sicuro di voler rimuovere "${playerName}" dall'asta #${roundId}? Il giocatore tornerà disponibile nel listone.`)) {
+            return;
+        }
+        
+        try {
+            const response = await fetch('?action=remove_player', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: `player=${encodeURIComponent(playerName)}&round_id=${roundId}`
+            });
+            
             const data = await response.json();
+            
             if (data.ok) {
-                allPlayers = data.players;
+                alert(`Giocatore "${playerName}" rimosso con successo!`);
+                // Reload the page to show updated data
+                location.reload();
+            } else {
+                alert(`Errore: ${data.error || 'Errore sconosciuto'}`);
             }
         } catch (e) {
-            console.error('Error loading players:', e);
+            console.error('Error removing player:', e);
+            alert('Errore durante la rimozione del giocatore');
         }
     }
 
-    function render(state){
-        lastState = state;
-        const c = state.current || {};
-        document.getElementById('player').textContent = c.active ? c.player : '—';
-        
-        // Handle current team logo
-        const currentLogo = document.getElementById('current-team-logo');
-        if (c.active && c.team) {
-            currentLogo.src = `?action=logo&team=${encodeURIComponent(c.team)}`;
-            currentLogo.style.display = 'inline-block';
-            currentLogo.onerror = () => currentLogo.style.display = 'none';
-        } else {
-            currentLogo.style.display = 'none';
-        }
-        
-        document.getElementById('amount').textContent = '$ ' + fmt(c.amount||0);
-        document.getElementById('leader').textContent = c.active && c.leader_name ? ('Leader: ' + c.leader_name) : '—';
-        // Presence render
-        const pres = document.getElementById('presence');
-        if (pres){
-          const entries = Object.entries(state.presence||{});
-          if (!entries.length){ pres.innerHTML = ''; }
-          else{
-            pres.innerHTML = entries.map(([pid,p])=>{
-              const name = (p && p.user_name) ? p.user_name : '—';
-              const initials = name.split(/\s+/).map(s=>s[0]).join('').toUpperCase().slice(0,2) || 'U';
-              const last = p && p.last_seen ? new Date(p.last_seen*1000).toLocaleTimeString('it-IT') : '—';
-              return `<div class="presence-card" title="${name}">
-                        <div class="avatar">${initials}</div>
-                        <div class="meta">
-                          <div class="name">${name}</div>
-                          <div class="sub"><span class="dot"></span>Ping: ${last}</div>
-                        </div>
-                      </div>`;
-            }).join('');
-          }
-        }
-        const tbody = document.getElementById('bids');
-        tbody.innerHTML = '';
-        (state.bids||[]).forEach(b => {
-            const tr = document.createElement('tr');
-            tr.innerHTML = `<td class="badge mono">${b.seq}</td><td>${new Date(b.ts).toLocaleTimeString('it-IT')}</td><td>${b.user_name||''}</td><td>+${b.delta||0}</td><td>$ ${fmt(b.amount||0)}</td>`;
-            tbody.appendChild(tr);
-        });
-
-        // Render history table rows
-        const h = document.getElementById('history');
-        if (h) {
-            h.innerHTML = '';
-            (state.history||[]).slice().reverse().forEach(r => {
-                const lastTs = (r.bids && r.bids.length) ? r.bids[r.bids.length-1].ts : null;
-                const lastStr = lastTs ? new Date(lastTs).toLocaleTimeString('it-IT') : '—';
-                const tr = document.createElement('tr');
-                
-                // Create team logo cell - try to find team from player name if not stored
-                let teamName = r.team;
-                if (!teamName && r.player && allPlayers) {
-                    const playerData = allPlayers.find(p => p.name === r.player);
-                    teamName = playerData ? playerData.team : '';
-                }
-                
-                const logoCell = teamName ? 
-                    `<td style="text-align:center;width:40px"><img src="?action=logo&team=${encodeURIComponent(teamName)}" alt="${teamName}" style="width:24px;height:24px;object-fit:contain;vertical-align:middle" onerror="this.style.display='none'"></td>` : 
-                    '<td style="text-align:center;width:40px"></td>';
-                
-                tr.innerHTML = `${logoCell}<td class="badge mono">${r.round_id}</td><td>${r.player}</td><td>${r.winner_name||'—'}</td><td>$ ${fmt(r.final_amount||0)}</td><td>${r.bids?.length||0}</td><td>${lastStr}</td>`;
-                h.appendChild(tr);
-            });
-        }
-    }
-
-    async function poll(){
-        try{
-          const r = await fetch('?action=state');
-          if(!r.ok) return;
-          const j = await r.json();
-          render(j.state);
-        }catch(e){}
-        setTimeout(poll, 400); // server poll every 400ms
-    }
-
-    // Smooth countdown every 100ms without extra server calls
-    setInterval(() => {
-      if (!lastState) return;
-      const c = lastState.current || {};
-      const t = document.getElementById('timer');
-      if (c.active && c.last_bid_time){
-        const remaining = Math.max(0, 5 - (Date.now()/1000 - c.last_bid_time));
-        t.textContent = (Math.ceil(remaining*10)/10).toFixed(1) + 's';
-      } else {
-        t.textContent = '—';
-      }
-    }, 100);
-
-    // Load players data first, then start polling
-    loadPlayers().then(() => {
-        poll();
-    });
+    // Load data when page loads
+    loadData();
     </script>
     <?php
     render_footer();
