@@ -231,7 +231,7 @@ if ($action === 'state') {
         if ($now - $lastCheck >= 1) {
             $state['__last_auto_check'] = $now;
             if ($state['current']['active'] && isset($state['current']['last_bid_time'])) {
-                if ($now - (int)$state['current']['last_bid_time'] >= 5) {
+                if ($now - (int)$state['current']['last_bid_time'] >= 5.5) {
                     $state['history'][] = [
                         'round_id' => $state['current']['round_id'],
                         'player' => $state['current']['player'],
@@ -296,6 +296,7 @@ button{padding:12px 14px;border:none;border-radius:12px;cursor:pointer}
 .screen .board{width:min(1100px,95vw);}
 .board h1{font-size:clamp(2rem,5vw,4rem);margin:.2em 0}
 .board .price{font-size:clamp(2.2rem,7vw,5rem);font-weight:900;color:var(--accent)}
+.board .timer-big{font-size:clamp(2rem,6vw,4rem);font-weight:900;color:var(--danger);text-align:center}
 .board .leader{font-size:clamp(1.1rem,3.2vw,2rem);color:#cbd5e1}
 .board .player{color:#93c5fd}
 .badge.mono{font-feature-settings:"tnum" 1; font-variant-numeric: tabular-nums}
@@ -327,11 +328,13 @@ if ($view === 'screen') {
         </div>
         <div class="footer" style="margin-top:4px">Utenti connessi</div>
         <div id="presence" class="presence-grid"></div>
-        <h1>Asta: <span id="player" class="player">—</span></h1>
-        <div class="price" id="amount">€ 0</div>
-        <div class="leader" id="leader">Leader: —</div>
-        <div class="footer">Aggiornamento in tempo reale (poll 400ms)</div>
-        <div class="footer" id="timer">Auto chiusura in: —</div>
+                 <h1>Asta: <span id="player" class="player">—</span></h1>
+         <div style="display:flex;align-items:center;justify-content:space-between;margin:20px 0">
+           <div class="price" id="amount">€ 0</div>
+           <div class="timer-big" id="timer">—</div>
+         </div>
+         <div class="leader" id="leader">Leader: —</div>
+         <div class="footer">Aggiornamento in tempo reale (poll 400ms)</div>
         <div class="list" style="margin-top:18px">
           <table>
             <thead><tr><th>#</th><th>Ora</th><th>Nome</th><th>+Δ</th><th>Totale</th></tr></thead>
@@ -418,9 +421,9 @@ if ($view === 'screen') {
       const t = document.getElementById('timer');
       if (c.active && c.last_bid_time){
         const remaining = Math.max(0, 5 - (Date.now()/1000 - c.last_bid_time));
-        t.textContent = 'Auto chiusura in: ' + (Math.ceil(remaining*10)/10).toFixed(1) + 's';
+        t.textContent = (Math.ceil(remaining*10)/10).toFixed(1) + 's';
       } else {
-        t.textContent = 'Auto chiusura in: —';
+        t.textContent = '—';
       }
     }, 100);
 
@@ -442,8 +445,8 @@ $me = current_user_name();
   </div>
 
   <div class="grid-2">
-    <div class="card">
-      <h2 class="title">1) Imposta il tuo nome</h2>
+    <div class="card" id="nameCard">
+      <h2 class="title">Imposta il tuo nome</h2>
       <form id="nameForm" class="row" onsubmit="return false;">
         <div class="col"><input type="text" id="name" placeholder="Il tuo nome" value="<?=h($me)?>" required></div>
         <div><button class="btn btn-primary" id="saveName">Salva</button></div>
@@ -452,7 +455,7 @@ $me = current_user_name();
     </div>
 
     <div class="card">
-      <h2 class="title">2) Avvia nuova asta</h2>
+      <h2 class="title">Avvia nuova asta</h2>
       <form id="startForm" class="row" onsubmit="return false;">
         <div class="col"><input type="text" id="player" placeholder="Nome giocatore" required></div>
         <div style="width:140px"><input type="number" id="start_price" placeholder="Prezzo iniziale" min="0" value="1"></div>
@@ -462,7 +465,7 @@ $me = current_user_name();
   </div>
 
   <div class="card" style="margin-top:16px">
-    <h2 class="title">3) Fai un'offerta</h2>
+    <h2 class="title">Fai un'offerta</h2>
     <div id="current" class="row" style="align-items:center;gap:16px">
       <div class="badge">Giocatore: <span id="c_player">—</span></div>
       <div class="badge">Totale: <span id="c_amount">€ 0</span></div>
@@ -511,6 +514,8 @@ document.getElementById('saveName').addEventListener('click', async ()=>{
   try {
     const j = await post('set_name', {name});
     document.getElementById('nameStatus').textContent = 'Salvato: ' + j.user_name;
+    // Hide the name card after successful save
+    document.getElementById('nameCard').style.display = 'none';
   } catch(e){ alert(e.message); }
 });
 
@@ -569,6 +574,12 @@ async function tick(){
   } catch(e) {}
   setTimeout(tick, 400);
 }
+
+// Hide name card if user already has a name
+if (document.getElementById('name').value.trim() !== '') {
+  document.getElementById('nameCard').style.display = 'none';
+}
+
 tick();
 
 // Smooth local countdown @ 100ms
