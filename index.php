@@ -124,6 +124,7 @@ if ($action === 'set_name' && $method === 'POST') {
 if ($action === 'start' && $method === 'POST') {
     $player = sanitize_text($_POST['player'] ?? '');
     $start  = (int)($_POST['start_price'] ?? 0);
+    $team   = sanitize_text($_POST['team'] ?? '');
     if ($player === '' || $start < 0) respond_json(['ok' => false, 'error' => 'Invalid player or start price'], 400);
     if (current_user_name() === '') respond_json(['ok' => false, 'error' => 'Set your name first'], 400);
 
@@ -131,7 +132,7 @@ if ($action === 'start' && $method === 'POST') {
     $uname = current_user_name();
     session_close_early();
 
-    $result = with_state_lock(function (&$state) use ($player, $start, $uid, $uname) {
+    $result = with_state_lock(function (&$state) use ($player, $start, $team, $uid, $uname) {
         // Do not allow starting a new round while one is active
         if ($state['current']['active']) {
             return ['error' => 'An auction round is already active'];
@@ -141,6 +142,7 @@ if ($action === 'start' && $method === 'POST') {
             'active' => true,
             'round_id' => $round_id,
             'player' => $player,
+            'team' => $team,
             'start_price' => $start,
             'amount' => $start,
             'leader_id' => $uid,
@@ -204,6 +206,56 @@ if ($action === 'bid' && $method === 'POST') {
 
 // Manual end removed; auto-close handles finalization
 
+if ($action === 'players') {
+    // Load players from CSV file
+    $players = [];
+    $csv_file = __DIR__ . '/config.csv';
+    
+    if (file_exists($csv_file)) {
+        $handle = fopen($csv_file, 'r');
+        if ($handle) {
+            // Skip header lines
+            fgetcsv($handle); // Skip "Quotazioni Fantacalcio Stagione 2025 26"
+            fgetcsv($handle); // Skip column headers
+            
+            while (($data = fgetcsv($handle)) !== false) {
+                if (count($data) >= 5) {
+                    $players[] = [
+                        'id' => $data[0],
+                        'role' => $data[1],
+                        'role_detail' => $data[2],
+                        'name' => $data[3],
+                        'team' => $data[4]
+                    ];
+                }
+            }
+            fclose($handle);
+        }
+    }
+    
+    respond_json(['ok' => true, 'players' => $players]);
+}
+
+if ($action === 'logo' && $method === 'GET') {
+    $team = $_GET['team'] ?? '';
+    if ($team === '') {
+        http_response_code(400);
+        exit('Team parameter required');
+    }
+    
+    $logo_file = __DIR__ . '/logo/' . $team . '.png';
+    if (!file_exists($logo_file)) {
+        http_response_code(404);
+        exit('Logo not found');
+    }
+    
+    // Serve the image
+    header('Content-Type: image/png');
+    header('Cache-Control: public, max-age=86400'); // Cache for 24 hours
+    readfile($logo_file);
+    exit;
+}
+
 if ($action === 'state') {
     // Read user then release session lock for fast polling
     $uid = current_user_id();
@@ -235,6 +287,7 @@ if ($action === 'state') {
                     $state['history'][] = [
                         'round_id' => $state['current']['round_id'],
                         'player' => $state['current']['player'],
+                        'team' => $state['current']['team'] ?? '',
                         'start_price' => $state['current']['start_price'],
                         'winner_name' => $state['current']['leader_name'],
                         'final_amount' => $state['current']['amount'],
@@ -309,6 +362,16 @@ button{padding:12px 14px;border:none;border-radius:12px;cursor:pointer}
 .presence-card .sub{font-size:.8rem;color:var(--muted)}
 .presence-card .dot{width:8px;height:8px;border-radius:999px;display:inline-block;margin-right:6px;background:#16a34a}
 .presence-card .dot.off{background:#64748b}
+/* Player search dropdown */
+.player-search-container{position:relative}
+.player-dropdown{position:absolute;top:100%;left:0;right:0;background:var(--card);border:1px solid #334155;border-radius:12px;max-height:300px;overflow-y:auto;z-index:1000;margin-top:4px}
+.player-dropdown-item{display:flex;align-items:center;gap:12px;padding:12px;cursor:pointer;border-bottom:1px solid #1f2937}
+.player-dropdown-item:hover{background:#1f2937}
+.player-dropdown-item:last-child{border-bottom:none}
+.player-dropdown-item .team-logo{width:24px;height:24px;object-fit:contain;display:block}
+.player-dropdown-item .player-info{flex:1;min-width:0}
+.player-dropdown-item .player-name{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.player-dropdown-item .player-role{font-size:.8rem;color:var(--muted);margin-top:2px}
 </style>';
     echo '</head><body>';
 }
@@ -328,9 +391,9 @@ if ($view === 'screen') {
         </div>
         <div class="footer" style="margin-top:4px">Utenti connessi</div>
         <div id="presence" class="presence-grid"></div>
-                 <h1>Asta: <span id="player" class="player">—</span></h1>
+                 <h1>Asta: <img id="current-team-logo" class="team-logo-screen" style="display:none;width:40px;height:40px;object-fit:contain;margin-right:10px;vertical-align:middle"> <span id="player" class="player">—</span></h1>
          <div style="display:flex;align-items:center;justify-content:space-between;margin:20px 0">
-           <div class="price" id="amount">€ 0</div>
+           <div class="price" id="amount">$ 0</div>
            <div class="timer-big" id="timer">—</div>
          </div>
          <div class="leader" id="leader">Leader: —</div>
@@ -345,7 +408,7 @@ if ($view === 'screen') {
           <div class="footer">Storico aste</div>
           <div class="list">
             <table>
-              <thead><tr><th>#</th><th>Giocatore</th><th>Vincitore</th><th>Totale</th><th>Offerte</th><th>Ultimo</th></tr></thead>
+              <thead><tr><th></th><th>#</th><th>Giocatore</th><th>Vincitore</th><th>Totale</th><th>Offerte</th><th>Ultimo</th></tr></thead>
               <tbody id="history"></tbody>
             </table>
           </div>
@@ -355,12 +418,37 @@ if ($view === 'screen') {
     <script>
     const fmt = n => new Intl.NumberFormat('it-IT').format(n);
     let lastState = null;
+    let allPlayers = [];
+
+    // Load players data for team logo fallback
+    async function loadPlayers() {
+        try {
+            const response = await fetch('?action=players');
+            const data = await response.json();
+            if (data.ok) {
+                allPlayers = data.players;
+            }
+        } catch (e) {
+            console.error('Error loading players:', e);
+        }
+    }
 
     function render(state){
         lastState = state;
         const c = state.current || {};
         document.getElementById('player').textContent = c.active ? c.player : '—';
-        document.getElementById('amount').textContent = '€ ' + fmt(c.amount||0);
+        
+        // Handle current team logo
+        const currentLogo = document.getElementById('current-team-logo');
+        if (c.active && c.team) {
+            currentLogo.src = `?action=logo&team=${encodeURIComponent(c.team)}`;
+            currentLogo.style.display = 'inline-block';
+            currentLogo.onerror = () => currentLogo.style.display = 'none';
+        } else {
+            currentLogo.style.display = 'none';
+        }
+        
+        document.getElementById('amount').textContent = '$ ' + fmt(c.amount||0);
         document.getElementById('leader').textContent = c.active && c.leader_name ? ('Leader: ' + c.leader_name) : '—';
         // Presence render
         const pres = document.getElementById('presence');
@@ -386,7 +474,7 @@ if ($view === 'screen') {
         tbody.innerHTML = '';
         (state.bids||[]).forEach(b => {
             const tr = document.createElement('tr');
-            tr.innerHTML = `<td class="badge mono">${b.seq}</td><td>${new Date(b.ts).toLocaleTimeString('it-IT')}</td><td>${b.user_name||''}</td><td>+${b.delta||0}</td><td>€ ${fmt(b.amount||0)}</td>`;
+            tr.innerHTML = `<td class="badge mono">${b.seq}</td><td>${new Date(b.ts).toLocaleTimeString('it-IT')}</td><td>${b.user_name||''}</td><td>+${b.delta||0}</td><td>$ ${fmt(b.amount||0)}</td>`;
             tbody.appendChild(tr);
         });
 
@@ -398,7 +486,19 @@ if ($view === 'screen') {
                 const lastTs = (r.bids && r.bids.length) ? r.bids[r.bids.length-1].ts : null;
                 const lastStr = lastTs ? new Date(lastTs).toLocaleTimeString('it-IT') : '—';
                 const tr = document.createElement('tr');
-                tr.innerHTML = `<td class="badge mono">${r.round_id}</td><td>${r.player}</td><td>${r.winner_name||'—'}</td><td>€ ${fmt(r.final_amount||0)}</td><td>${r.bids?.length||0}</td><td>${lastStr}</td>`;
+                
+                // Create team logo cell - try to find team from player name if not stored
+                let teamName = r.team;
+                if (!teamName && r.player && allPlayers) {
+                    const playerData = allPlayers.find(p => p.name === r.player);
+                    teamName = playerData ? playerData.team : '';
+                }
+                
+                const logoCell = teamName ? 
+                    `<td style="text-align:center;width:40px"><img src="?action=logo&team=${encodeURIComponent(teamName)}" alt="${teamName}" style="width:24px;height:24px;object-fit:contain;vertical-align:middle" onerror="this.style.display='none'"></td>` : 
+                    '<td style="text-align:center;width:40px"></td>';
+                
+                tr.innerHTML = `${logoCell}<td class="badge mono">${r.round_id}</td><td>${r.player}</td><td>${r.winner_name||'—'}</td><td>$ ${fmt(r.final_amount||0)}</td><td>${r.bids?.length||0}</td><td>${lastStr}</td>`;
                 h.appendChild(tr);
             });
         }
@@ -427,7 +527,10 @@ if ($view === 'screen') {
       }
     }, 100);
 
-    poll();
+    // Load players data first, then start polling
+    loadPlayers().then(() => {
+        poll();
+    });
     </script>
     <?php
     render_footer();
@@ -457,7 +560,12 @@ $me = current_user_name();
     <div class="card">
       <h2 class="title">Avvia nuova asta</h2>
       <form id="startForm" class="row" onsubmit="return false;">
-        <div class="col"><input type="text" id="player" placeholder="Nome giocatore" required></div>
+        <div class="col">
+          <div class="player-search-container">
+            <input type="text" id="player" placeholder="Cerca giocatore..." required>
+            <div id="playerDropdown" class="player-dropdown" style="display: none;"></div>
+          </div>
+        </div>
         <div style="width:140px"><input type="number" id="start_price" placeholder="Prezzo iniziale" min="0" value="1"></div>
         <div><button class="btn btn-accent" id="startBtn">Avvia</button></div>
       </form>
@@ -468,7 +576,7 @@ $me = current_user_name();
     <h2 class="title">Fai un'offerta</h2>
     <div id="current" class="row" style="align-items:center;gap:16px">
       <div class="badge">Giocatore: <span id="c_player">—</span></div>
-      <div class="badge">Totale: <span id="c_amount">€ 0</span></div>
+      <div class="badge">Totale: <span id="c_amount">$ 0</span></div>
       <div class="badge">Leader: <span id="c_leader">—</span></div>
       <div class="badge">Round #<span id="c_round">—</span></div>
       <div class="badge">Auto chiusura: <span id="c_timer">—</span></div>
@@ -519,11 +627,112 @@ document.getElementById('saveName').addEventListener('click', async ()=>{
   } catch(e){ alert(e.message); }
 });
 
+// Player search functionality
+let allPlayers = [];
+let filteredPlayers = [];
+
+async function loadPlayers() {
+  try {
+    const response = await fetch('?action=players');
+    const data = await response.json();
+    if (data.ok) {
+      allPlayers = data.players;
+    }
+  } catch (e) {
+    console.error('Error loading players:', e);
+  }
+}
+
+function filterPlayers(query) {
+  if (!query.trim()) {
+    filteredPlayers = [];
+    return;
+  }
+  
+  const searchTerm = query.toLowerCase();
+  filteredPlayers = allPlayers.filter(player => 
+    player.name.toLowerCase().includes(searchTerm) ||
+    player.team.toLowerCase().includes(searchTerm)
+  ).slice(0, 10); // Limit to 10 results
+}
+
+function showDropdown() {
+  const dropdown = document.getElementById('playerDropdown');
+  if (filteredPlayers.length === 0) {
+    dropdown.style.display = 'none';
+    return;
+  }
+  
+  dropdown.innerHTML = filteredPlayers.map(player => `
+    <div class="player-dropdown-item" data-player="${player.name}">
+      <img src="?action=logo&team=${encodeURIComponent(player.team)}" alt="${player.team}" class="team-logo" onerror="this.style.display='none'" onload="this.style.display='block'">
+      <div class="player-info">
+        <div class="player-name">${player.name}</div>
+        <div class="player-role">${player.role} - ${player.team}</div>
+      </div>
+    </div>
+  `).join('');
+  
+  dropdown.style.display = 'block';
+  
+  // Add click handlers
+  dropdown.querySelectorAll('.player-dropdown-item').forEach(item => {
+    item.addEventListener('click', () => {
+      document.getElementById('player').value = item.dataset.player;
+      dropdown.style.display = 'none';
+    });
+  });
+  
+  // Debug: Log the first few players to check team names
+  if (filteredPlayers.length > 0) {
+    console.log('First player:', filteredPlayers[0]);
+    console.log('Image path:', `logo/${filteredPlayers[0].team}.png`);
+  }
+}
+
+function hideDropdown() {
+  document.getElementById('playerDropdown').style.display = 'none';
+}
+
+// Initialize player search
+document.addEventListener('DOMContentLoaded', () => {
+  loadPlayers();
+  
+  const playerInput = document.getElementById('player');
+  
+  playerInput.addEventListener('input', (e) => {
+    filterPlayers(e.target.value);
+    showDropdown();
+  });
+  
+  playerInput.addEventListener('focus', () => {
+    if (playerInput.value.trim()) {
+      filterPlayers(playerInput.value);
+      showDropdown();
+    }
+  });
+  
+  // Hide dropdown when clicking outside
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.player-search-container')) {
+      hideDropdown();
+    }
+  });
+});
+
 // Start
 document.getElementById('startBtn').addEventListener('click', async ()=>{
   const player = document.getElementById('player').value.trim();
   const start_price = document.getElementById('start_price').valueAsNumber || 0;
-  try { await post('start', {player, start_price}); } catch(e){ alert(e.message); }
+  
+  // Find the team for the selected player
+  let team = '';
+  if (player) {
+    const playerData = allPlayers.find(p => p.name === player);
+    team = playerData ? playerData.team : '';
+  }
+  
+  try { await post('start', {player, start_price, team}); } catch(e){ alert(e.message); }
 });
 
 // Bid buttons
@@ -543,14 +752,14 @@ function renderState(s){
   lastState = s;
   const c = s.current || {};
   document.getElementById('c_player').textContent = c.active ? c.player : '—';
-  document.getElementById('c_amount').textContent = '€ ' + fmt(c.amount||0);
+  document.getElementById('c_amount').textContent = '$ ' + fmt(c.amount||0);
   document.getElementById('c_leader').textContent = c.leader_name || '—';
   document.getElementById('c_round').textContent = c.round_id || '—';
   const tbody = document.getElementById('list');
   tbody.innerHTML = '';
   (s.bids||[]).forEach(b => {
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td class="badge mono">${b.seq}</td><td>${new Date(b.ts).toLocaleTimeString('it-IT')}</td><td>${b.user_name||''}</td><td>+${b.delta||0}</td><td>€ ${fmt(b.amount||0)}</td>`;
+    tr.innerHTML = `<td class="badge mono">${b.seq}</td><td>${new Date(b.ts).toLocaleTimeString('it-IT')}</td><td>${b.user_name||''}</td><td>+${b.delta||0}</td><td>$ ${fmt(b.amount||0)}</td>`;
     tbody.appendChild(tr);
   });
   const h = document.getElementById('history');
@@ -559,7 +768,7 @@ function renderState(s){
     const lastTs = (r.bids && r.bids.length) ? r.bids[r.bids.length-1].ts : null;
     const lastStr = lastTs ? new Date(lastTs).toLocaleTimeString('it-IT') : '—';
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td class="badge mono">${r.round_id}</td><td>${r.player}</td><td>${r.winner_name||'—'}</td><td>€ ${fmt(r.final_amount||0)}</td><td>${r.bids?.length||0}</td><td>${lastStr}</td>`;
+    tr.innerHTML = `<td class="badge mono">${r.round_id}</td><td>${r.player}</td><td>${r.winner_name||'—'}</td><td>$ ${fmt(r.final_amount||0)}</td><td>${r.bids?.length||0}</td><td>${lastStr}</td>`;
     h.appendChild(tr);
   });
 }
